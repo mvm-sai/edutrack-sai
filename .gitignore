@@ -31,3 +31,8 @@ npm-debug.log*
 
 # Capacitor build
 frontend/android/app/build/
+
+# Local WhatsApp bot
+local-whatsapp/node_modules/
+local-whatsapp/.wwebjs_auth/
+local-whatsapp/.wwebjs_cache/

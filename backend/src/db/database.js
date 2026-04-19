@@ -136,6 +136,19 @@ const SCHEMA = `
     whatsapp_error  TEXT,
     created_at      TEXT    DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS whatsapp_queue (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone           TEXT    NOT NULL,
+    message         TEXT    NOT NULL,
+    student_name    TEXT,
+    attendance_id   INTEGER,
+    sent            INTEGER DEFAULT 0,
+    attempts        INTEGER DEFAULT 0,
+    error           TEXT,
+    created_at      TEXT    DEFAULT (datetime('now')),
+    sent_at         TEXT
+  );
 `;
 
 // ─── Async initialiser (called once from server.js) ───────────────────────────

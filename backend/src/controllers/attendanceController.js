@@ -1,5 +1,7 @@
 const { db } = require('../db/database');
-const { sendMessage } = require('../whatsapp/client');
+const { sendMessage, getStatus } = require('../whatsapp/client');
+
+const isProduction = process.env.NODE_ENV === 'production';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const buildMessage = (studentName, status, classTaken, homework) => {
@@ -20,6 +22,17 @@ const buildMessage = (studentName, status, classTaken, homework) => {
     `Please ensure your child completes and submits the homework tomorrow.\n\n` +
     `Thank you.`
   );
+};
+
+/**
+ * Queue a WhatsApp message for the local bot to pick up.
+ * Used in production where direct sending is disabled.
+ */
+const queueWhatsAppMessage = (phone, message, studentName, attendanceId) => {
+  db.prepare(`
+    INSERT INTO whatsapp_queue (phone, message, student_name, attendance_id)
+    VALUES (?, ?, ?, ?)
+  `).run(phone, message, studentName, attendanceId);
 };
 
 // ─── POST /api/attendance/submit ─────────────────────────────────────────────
@@ -59,20 +72,28 @@ const submitAttendance = async (req, res) => {
   // ── Build WhatsApp message
   const message = buildMessage(student.name, status, class_taken.trim(), homework.trim());
 
-  // ── Attempt WhatsApp send
+  // ── Attempt WhatsApp send or queue
   let whatsapp_sent  = 0;
   let whatsapp_error = null;
 
-  try {
-    await sendMessage(student.parent_whatsapp, message);
-    whatsapp_sent = 1;
-    console.log(`✅ WhatsApp sent → ${student.name}'s parent (${student.parent_whatsapp})`);
-  } catch (err) {
-    whatsapp_error = err.message;
-    console.warn(`⚠️  WhatsApp failed for ${student.name}: ${err.message}`);
+  if (isProduction) {
+    // Queue message for the local WhatsApp bot to pick up
+    whatsapp_error = 'queued';
+    console.log(`📬 Queued WhatsApp message for ${student.name}'s parent (${student.parent_whatsapp})`);
+  } else {
+    // Direct send in development
+    try {
+      await sendMessage(student.parent_whatsapp, message);
+      whatsapp_sent = 1;
+      console.log(`✅ WhatsApp sent → ${student.name}'s parent (${student.parent_whatsapp})`);
+    } catch (err) {
+      whatsapp_error = err.message;
+      console.warn(`⚠️  WhatsApp failed for ${student.name}: ${err.message}`);
+    }
   }
 
   // ── Save to database (upsert by student_id + date)
+  let attendanceId;
   if (existingRecord) {
     db.prepare(`
       UPDATE attendance
@@ -80,11 +101,18 @@ const submitAttendance = async (req, res) => {
           whatsapp_sent = ?, whatsapp_error = ?, teacher_id = ?
       WHERE student_id = ? AND date = ?
     `).run(status, class_taken.trim(), homework.trim(), whatsapp_sent, whatsapp_error, req.teacher.id, student_id, today);
+    attendanceId = existingRecord.id;
   } else {
-    db.prepare(`
+    const result = db.prepare(`
       INSERT INTO attendance (student_id, teacher_id, date, status, class_taken, homework, whatsapp_sent, whatsapp_error)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(student_id, req.teacher.id, today, status, class_taken.trim(), homework.trim(), whatsapp_sent, whatsapp_error);
+    attendanceId = result.lastInsertRowid;
+  }
+
+  // Queue message in production after saving attendance
+  if (isProduction) {
+    queueWhatsAppMessage(student.parent_whatsapp, message, student.name, attendanceId);
   }
 
   const isUpdate = !!existingRecord;
@@ -95,11 +123,14 @@ const submitAttendance = async (req, res) => {
     student:         student.name,
     status,
     whatsapp_sent:   whatsapp_sent === 1,
-    whatsapp_error,
+    whatsapp_queued: isProduction,
+    whatsapp_error:  isProduction ? null : whatsapp_error,
     message_preview: message,
-    feedback:        whatsapp_sent === 1
-      ? `✅ Attendance ${isUpdate ? 'updated' : 'marked'} and WhatsApp message sent to ${student.name}'s parent!`
-      : `📋 Attendance ${isUpdate ? 'updated' : 'marked'}. WhatsApp message could not be sent: ${whatsapp_error}`,
+    feedback:        isProduction
+      ? `📋 Attendance ${isUpdate ? 'updated' : 'marked'}. WhatsApp message queued for delivery.`
+      : whatsapp_sent === 1
+        ? `✅ Attendance ${isUpdate ? 'updated' : 'marked'} and WhatsApp message sent to ${student.name}'s parent!`
+        : `📋 Attendance ${isUpdate ? 'updated' : 'marked'}. WhatsApp message could not be sent: ${whatsapp_error}`,
   });
 };
 
@@ -144,15 +175,20 @@ const submitBulkAttendance = async (req, res) => {
     let whatsapp_sent = 0;
     let whatsapp_error = null;
 
-    try {
-      await sendMessage(student.parent_whatsapp, message);
-      whatsapp_sent = 1;
-      console.log(`✅ WhatsApp sent → ${student.name}'s parent (${student.parent_whatsapp})`);
-    } catch (err) {
-      whatsapp_error = err.message;
-      console.warn(`⚠️  WhatsApp failed for ${student.name}: ${err.message}`);
+    if (isProduction) {
+      whatsapp_error = 'queued';
+    } else {
+      try {
+        await sendMessage(student.parent_whatsapp, message);
+        whatsapp_sent = 1;
+        console.log(`✅ WhatsApp sent → ${student.name}'s parent (${student.parent_whatsapp})`);
+      } catch (err) {
+        whatsapp_error = err.message;
+        console.warn(`⚠️  WhatsApp failed for ${student.name}: ${err.message}`);
+      }
     }
 
+    let attendanceId;
     if (existingRecord) {
       db.prepare(`
         UPDATE attendance
@@ -160,11 +196,18 @@ const submitBulkAttendance = async (req, res) => {
             whatsapp_sent = ?, whatsapp_error = ?, teacher_id = ?
         WHERE student_id = ? AND date = ?
       `).run(status, class_taken.trim(), homework.trim(), whatsapp_sent, whatsapp_error, req.teacher.id, student_id, today);
+      attendanceId = existingRecord.id;
     } else {
-      db.prepare(`
+      const result = db.prepare(`
         INSERT INTO attendance (student_id, teacher_id, date, status, class_taken, homework, whatsapp_sent, whatsapp_error)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(student_id, req.teacher.id, today, status, class_taken.trim(), homework.trim(), whatsapp_sent, whatsapp_error);
+      attendanceId = result.lastInsertRowid;
+    }
+
+    // Queue in production
+    if (isProduction) {
+      queueWhatsAppMessage(student.parent_whatsapp, message, student.name, attendanceId);
     }
 
     results.push({
@@ -174,7 +217,8 @@ const submitBulkAttendance = async (req, res) => {
       success: true,
       updated: !!existingRecord,
       whatsapp_sent: whatsapp_sent === 1,
-      whatsapp_error,
+      whatsapp_queued: isProduction,
+      whatsapp_error: isProduction ? null : whatsapp_error,
     });
   }
 

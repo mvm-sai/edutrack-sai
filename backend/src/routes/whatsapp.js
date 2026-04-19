@@ -128,4 +128,88 @@ router.get('/qr-data', async (_req, res) => {
   }
 });
 
+// ─── WhatsApp Queue API (for local bot) ──────────────────────────────────────
+// These endpoints are used by the local WhatsApp bot to poll and process messages.
+// Secured with a simple API key (BOT_API_KEY env variable).
+
+const botAuth = (req, res, next) => {
+  const key = req.headers['x-bot-key'] || req.query.key;
+  const expectedKey = process.env.BOT_API_KEY || 'edutrack-bot-secret-2024';
+  if (key !== expectedKey) {
+    return res.status(401).json({ error: 'Invalid bot API key.' });
+  }
+  next();
+};
+
+// GET /api/whatsapp/pending-messages — local bot polls this
+router.get('/pending-messages', botAuth, (_req, res) => {
+  try {
+    const { db } = require('../db/database');
+    const pending = db.prepare(`
+      SELECT id, phone, message, student_name, attendance_id, attempts, created_at
+      FROM whatsapp_queue
+      WHERE sent = 0 AND attempts < 3
+      ORDER BY created_at ASC
+      LIMIT 50
+    `).all();
+    res.json({ count: pending.length, messages: pending });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/whatsapp/mark-sent — local bot marks message as delivered
+router.post('/mark-sent', botAuth, (req, res) => {
+  try {
+    const { db } = require('../db/database');
+    const { messageId, success, error: sendError } = req.body;
+
+    if (!messageId) {
+      return res.status(400).json({ error: 'messageId is required.' });
+    }
+
+    if (success) {
+      // Mark as sent
+      db.prepare(`
+        UPDATE whatsapp_queue SET sent = 1, sent_at = datetime('now') WHERE id = ?
+      `).run(messageId);
+
+      // Also update the attendance record
+      const queueItem = db.prepare('SELECT attendance_id FROM whatsapp_queue WHERE id = ?').get(messageId);
+      if (queueItem && queueItem.attendance_id) {
+        db.prepare(`
+          UPDATE attendance SET whatsapp_sent = 1, whatsapp_error = NULL WHERE id = ?
+        `).run(queueItem.attendance_id);
+      }
+    } else {
+      // Increment attempt count
+      db.prepare(`
+        UPDATE whatsapp_queue SET attempts = attempts + 1, error = ? WHERE id = ?
+      `).run(sendError || 'Unknown error', messageId);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/whatsapp/queue-stats — check queue status
+router.get('/queue-stats', botAuth, (_req, res) => {
+  try {
+    const { db } = require('../db/database');
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*)                                    AS total,
+        SUM(CASE WHEN sent = 1 THEN 1 ELSE 0 END)  AS sent,
+        SUM(CASE WHEN sent = 0 AND attempts < 3 THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN sent = 0 AND attempts >= 3 THEN 1 ELSE 0 END) AS failed
+      FROM whatsapp_queue
+    `).get();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;
