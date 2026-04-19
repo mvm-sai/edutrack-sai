@@ -10,28 +10,6 @@ router.get('/status', auth, getWhatsAppStatus);
 
 // GET /api/whatsapp/qr  — show QR code in browser (no auth, for easy scanning)
 router.get('/qr', async (_req, res) => {
-  const { isDisabled } = require('../whatsapp/client').getStatus();
-
-  if (isDisabled) {
-    return res.send(`
-      <!DOCTYPE html>
-      <html><head><title>WhatsApp — Production</title>
-      <style>
-        body { font-family: 'Segoe UI', sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #0b141a; color: #e9edef; }
-        .card { text-align: center; padding: 40px; border-radius: 16px; background: #1f2c33; max-width: 480px; }
-        h2 { color: #f59e0b; }
-        p { color: #8696a0; line-height: 1.6; }
-      </style>
-      </head><body>
-        <div class="card">
-          <h2>⚠️ WhatsApp Unavailable</h2>
-          <p>WhatsApp integration is disabled in production cloud environments.</p>
-          <p style="font-size:13px; opacity:0.7;">To use WhatsApp features, run the app on a local machine or VPS with a real browser.</p>
-        </div>
-      </body></html>
-    `);
-  }
-
   const qrString = getLatestQr();
 
   if (!qrString) {
@@ -94,15 +72,7 @@ router.get('/qr', async (_req, res) => {
 
 // GET /api/whatsapp/qr-data  — JSON endpoint for frontend QR modal
 router.get('/qr-data', async (_req, res) => {
-  const { isReady, hasClient, isInitializing, isDisabled } = require('../whatsapp/client').getStatus();
-
-  if (isDisabled) {
-    return res.json({
-      status: 'disabled',
-      qr: null,
-      message: 'WhatsApp is unavailable in production. Use a local or VPS setup for WhatsApp features.',
-    });
-  }
+  const { isReady, hasClient, isInitializing } = require('../whatsapp/client').getStatus();
 
   const qrString = getLatestQr();
 
